@@ -422,6 +422,7 @@ restore_full_snapshot() {
   local dest_multi_auth_dir="$4"
 
   python3 - "$bundle_root" "$dest_config_dir" "$dest_auth_file" "$dest_multi_auth_dir" <<'PY'
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -448,6 +449,26 @@ def replace_file(src: Path, dst: Path):
 replace_dir(snapshots / "config" / "opencode", dest_config_dir)
 replace_file(snapshots / "data" / "opencode" / "auth.json", dest_auth_file)
 replace_dir(snapshots / "plugin-state" / "opencode-multi-auth", dest_multi_auth_dir)
+
+# Warn about invalid accounts in multi-auth
+accounts_file = dest_multi_auth_dir / "accounts.json"
+if accounts_file.exists():
+    try:
+        with open(accounts_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        accounts = data.get("accounts", {})
+        if isinstance(accounts, dict):
+            invalid = [alias for alias, acc in accounts.items() if acc.get("authInvalid", False)]
+            if invalid:
+                print(f"[import][warn] multi-auth has {len(invalid)} invalid account(s): {', '.join(invalid)}")
+                print("[import][warn] Re-authenticate with: opencode-multi-auth add <alias>")
+        elif isinstance(accounts, list):
+            invalid = [acc.get("alias", "?") for acc in accounts if acc.get("authInvalid", False)]
+            if invalid:
+                print(f"[import][warn] multi-auth has {len(invalid)} invalid account(s): {', '.join(invalid)}")
+                print("[import][warn] Re-authenticate with: opencode-multi-auth add <alias>")
+    except Exception:
+        pass
 PY
 }
 
