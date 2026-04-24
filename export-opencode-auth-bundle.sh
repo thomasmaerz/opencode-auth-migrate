@@ -9,6 +9,8 @@ TEST_PROMPT="Reply with exactly: PROVIDER_OK"
 DRY_RUN=0
 SELF_CHECK=0
 NO_ENCRYPT=0
+STOCK_SOURCE="local"
+REFRESH_STOCK=0
 OUTPUT_PATH=""
 
 log() {
@@ -33,6 +35,8 @@ Options:
   --dry-run            Print what would be exported and exit
   --no-encrypt         Write plain .tar.gz bundle (for local testing)
   --self-check         Validate runtime dependencies only
+  --refresh-stock     Refresh stock plugin catalog before classifying
+  --stock-source       Source for stock plugins: local|refresh|auto (default: local)
   -h, --help           Show this help
 
 Notes:
@@ -75,6 +79,15 @@ parse_args() {
       --self-check)
         SELF_CHECK=1
         shift
+        ;;
+      --refresh-stock)
+        REFRESH_STOCK=1
+        shift
+        ;;
+      --stock-source)
+        [[ $# -ge 2 ]] || die "--stock-source requires a value"
+        STOCK_SOURCE="$2"
+        shift 2
         ;;
       -h|--help)
         usage
@@ -144,6 +157,8 @@ def classify_plugin(entry: str, token_index: int):
         if os.path.exists(maybe_local):
             resolved = maybe_local
 
+    is_stock = raw in ("opencode-openai-codex-auth", "opencode-gemini-auth", "opencode-antigravity-auth", "opencode-google-antigravity-auth")
+
     if is_explicit_local or (resolved is not None and os.path.exists(resolved)):
         token = f"local-{token_index:03d}"
         return {
@@ -152,11 +167,13 @@ def classify_plugin(entry: str, token_index: int):
             "token": token,
             "resolved_path": resolved,
             "exists": bool(resolved and os.path.exists(resolved)),
+            "is_stock": is_stock,
         }
 
     return {
         "kind": "package",
         "source_spec": raw,
+        "is_stock": is_stock,
     }
 
 plugins_seen = set()
@@ -319,7 +336,7 @@ for plugin in context.get("plugins", []):
 manifest = {
     "schema_version": 1,
     "bundle_type": "opencode-auth-migrate",
-    "exported_at": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "exported_at": dt.datetime.utcnow().strftime("%Y-%m-%dT%H:%M%SZ"),
     "opencode_version": opencode_version,
     "verification_prompt": test_prompt,
     "source": {
@@ -329,6 +346,8 @@ manifest = {
         "data_dir_hint": "~/.local/share/opencode",
     },
     "plugins": exported_plugins,
+    "non_stock_auth_plugins": [p.get("source_spec") for p in exported_plugins if not p.get("is_stock", False)],
+    "stock_source_used": STOCK_SOURCE,
     "providers": {
         "from_auth": context.get("providers_from_auth", []),
         "from_config": context.get("providers_from_config", []),
@@ -388,6 +407,7 @@ with context_path.open("r", encoding="utf-8") as f:
 
 plugins = ctx.get("plugins", [])
 local_count = len([p for p in plugins if p.get("kind") == "local"])
+non_stock = [p.get("source_spec") for p in plugins if not p.get("is_stock", False)]
 
 print("[export] dry run summary")
 print(f"[export] config dir: {config_dir}")
@@ -397,6 +417,12 @@ print(f"[export] multi-auth dir: {multi_auth_dir} (exists={multi_auth_dir.exists
 print(f"[export] plugins detected: {len(plugins)} (local={local_count}, package={len(plugins)-local_count})")
 print(f"[export] providers from auth: {len(ctx.get('providers_from_auth', []))}")
 print(f"[export] providers from config: {len(ctx.get('providers_from_config', []))}")
+if non_stock:
+    print("[export] non-stock auth plugins detected:")
+    for i, p in enumerate(non_stock, 1):
+        print(f"[export] {i}) {p}")
+else:
+    print("[export] non-stock auth plugins detected: none")
 PY
 }
 

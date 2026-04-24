@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "source": "anomalyco/opencode docs and source references",
+  "updated_at": "2026-04-24T00:00:00Z",
+  "plugins": [
+    "opencode-openai-codex-auth",
+    "opencode-gemini-auth",
+    "opencode-antigravity-auth",
+    "opencode-google-antigravity-auth"
+  ]
+}

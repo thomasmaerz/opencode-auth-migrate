@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "overrides": {
+    "opencode-multi-auth-codex": {
+      "repo": "https://github.com/guard22/opencode-multi-auth-codex",
+      "reason": "not consistently listed on ecosystem page"
+    }
+  }
+}

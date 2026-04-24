@@ -291,18 +291,55 @@ local_sources_root = bundle_root / "plugin-sources" / "local"
 dest_local_root = dest_config_dir / "plugins-migrated"
 dest_local_root.mkdir(parents=True, exist_ok=True)
 
+opencode_json_path = dest_config_dir / "opencode.json"
+existing_plugins = []
+if opencode_json_path.exists():
+    try:
+        with opencode_json_path.open("r", encoding="utf-8") as f:
+            existing = json.load(f)
+        if isinstance(existing, dict) and isinstance(existing.get("plugin"), list):
+            existing_plugins = [str(p) for p in existing["plugin"] if isinstance(p, str)]
+    except Exception:
+        pass
+
+def normalize_plugin(entry: str) -> str:
+    normalized = entry.strip()
+    normalized = normalized.rstrip("/")
+    for suffix in ["@latest", "@main", "@master"]:
+        if normalized.endswith(suffix):
+            normalized = normalized[: -len(suffix)]
+    return normalized
+
+def plugin_matches(existing: str, incoming: str) -> bool:
+    existing_norm = normalize_plugin(existing)
+    incoming_norm = normalize_plugin(incoming)
+    if existing_norm == incoming_norm:
+        return True
+    if existing_norm.endswith(incoming_norm) or incoming_norm.endswith(existing_norm):
+        return True
+    return False
+
 resolved_plugin_entries = []
 plugin_results = []
 
 for plugin in plugins:
     kind = plugin.get("kind")
     source_spec = plugin.get("source_spec")
+    action = "installed"
+    matched_existing = None
+    
+    for existing in existing_plugins:
+        if plugin_matches(existing, source_spec):
+            matched_existing = existing
+            action = "skipped_already_present"
+            break
+    
     if kind == "local":
         token = plugin.get("token")
         src = local_sources_root / str(token)
         dst = dest_local_root / str(token)
         copied = False
-        if src.exists():
+        if action == "installed" and src.exists():
             if dst.exists():
                 shutil.rmtree(dst)
             shutil.copytree(src, dst)
@@ -313,16 +350,21 @@ for plugin in plugins:
             "source_spec": source_spec,
             "token": token,
             "copied": copied,
+            "action": action,
+            "matched_existing": matched_existing,
             "resolved_entry": str(dst) if copied else None,
         })
     else:
-        if isinstance(source_spec, str) and source_spec:
-            resolved_plugin_entries.append(source_spec)
+        if action == "installed":
+            if isinstance(source_spec, str) and source_spec:
+                resolved_plugin_entries.append(source_spec)
         plugin_results.append({
             "kind": kind,
             "source_spec": source_spec,
             "copied": None,
-            "resolved_entry": source_spec,
+            "action": action,
+            "matched_existing": matched_existing,
+            "resolved_entry": source_spec if action == "installed" else None,
         })
 
 deduped = []
@@ -334,7 +376,6 @@ for entry in resolved_plugin_entries:
     deduped.append(entry)
 
 dest_config_dir.mkdir(parents=True, exist_ok=True)
-opencode_json_path = dest_config_dir / "opencode.json"
 data = {}
 if opencode_json_path.exists():
     try:
@@ -356,6 +397,8 @@ runtime = {
     "plugin_results": plugin_results,
     "resolved_plugins": deduped,
     "opencode_json_path": str(opencode_json_path),
+    "existing_plugins": existing_plugins,
+    "plugin_actions": [{"plugin": r.get("source_spec"), "action": r.get("action")} for r in plugin_results],
 }
 with runtime_json.open("w", encoding="utf-8") as f:
     json.dump(runtime, f, indent=2)
@@ -662,6 +705,27 @@ main() {
     backup_current_state "$manifest_path" "$backup_root" "$dest_config_dir" "$dest_auth_file" "$dest_multi_auth_dir"
     restore_source_first_state "$bundle_root" "$imported_snapshot_root" "$dest_config_dir" "$dest_auth_file" "$dest_multi_auth_dir"
     apply_plugin_sources_and_config "$bundle_root" "$dest_config_dir" "$report_root/runtime.json"
+  fi
+
+  if [[ -f "$report_root/runtime.json" ]]; then
+    python3 - "$report_root/runtime.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+rt_path = Path(sys.argv[1])
+with rt_path.open("r") as f:
+    rt = json.load(f)
+actions = rt.get("plugin_actions", [])
+print("[import] plugin actions:")
+for a in actions:
+    src = a.get("plugin", "unknown")
+    act = a.get("action", "unknown")
+    matched = a.get("matched_existing")
+    if matched:
+        print(f"[import] - {src}: {act} (matches existing: {matched})")
+    else:
+        print(f"[import] - {src}: {act}")
+PY
   fi
 
   local bootstrap_log="$report_root/bootstrap.log"

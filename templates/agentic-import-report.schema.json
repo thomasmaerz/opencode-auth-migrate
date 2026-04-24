@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Agentic Import Report",
+  "required": ["created_at", "plugin_actions", "provider_results"],
+  "properties": {
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when report was created"
+    },
+    "bundle_path": {
+      "type": "string",
+      "description": "Path to the imported bundle"
+    },
+    "plugin_actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "plugin": {
+            "type": "string",
+            "description": "Plugin source spec or name"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "updated_from_ecosystem",
+              "installed_from_original",
+              "skipped_already_present",
+              "failed"
+            ],
+            "description": "Action taken for this plugin"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Optional reason for the action"
+          },
+          "source": {
+            "type": "string",
+            "description": "Source of the installed plugin (ecosystem, original, etc.)"
+          }
+        },
+        "required": ["plugin", "action"]
+      }
+    },
+    "provider_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string",
+            "description": "Provider name"
+          },
+          "model": {
+            "type": "string",
+            "description": "Model used for test"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "fail", "skip"],
+            "description": "Test result status"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Optional reason for skip or fail"
+          },
+          "log_file": {
+            "type": "string",
+            "description": "Path to log file with full output"
+          }
+        },
+        "required": ["provider", "status"]
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stage": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
