@@ -122,6 +122,63 @@ decrypt_if_needed() {
   fi
 }
 
+reset_multi_auth_invalid_flags() {
+  local multi_auth_dir="$1"
+  local accounts_file="$multi_auth_dir/accounts.json"
+  if [[ ! -f "$accounts_file" ]]; then
+    return 0
+  fi
+  python3 - "$accounts_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    changed = False
+    accounts = data.get("accounts", {})
+    if isinstance(accounts, dict):
+        for alias, acc in accounts.items():
+            if acc.get("authInvalid"):
+                print(f"[import] resetting authInvalid for account: {alias}")
+                acc["authInvalid"] = False
+                # Clear stale error state from previous machine session
+                for key in ("limitError", "lastLimitErrorAt", "authInvalidatedAt"):
+                    if key in acc:
+                        del acc[key]
+                # Clear rate limiting that was specific to the source machine
+                for key in ("rateLimitedUntil",):
+                    if key in acc and acc[key] > 0:
+                        print(f"[import] clearing rateLimitedUntil for account: {alias}")
+                        acc[key] = 0
+                changed = True
+    elif isinstance(accounts, list):
+        for acc in accounts:
+            if acc.get("authInvalid"):
+                alias = acc.get("alias", "?")
+                print(f"[import] resetting authInvalid for account: {alias}")
+                acc["authInvalid"] = False
+                for key in ("limitError", "lastLimitErrorAt", "authInvalidatedAt"):
+                    if key in acc:
+                        del acc[key]
+                for key in ("rateLimitedUntil",):
+                    if key in acc and acc[key] > 0:
+                        print(f"[import] clearing rateLimitedUntil for account: {alias}")
+                        acc[key] = 0
+                changed = True
+    if changed:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print("[import] reset invalid flags on imported accounts")
+    else:
+        print("[import] no invalid accounts to reset")
+except Exception as e:
+    print(f"[import][warn] failed to reset invalid flags: {e}")
+PY
+}
+
 locate_bundle_root() {
   local extracted_dir="$1"
   local entries=("$extracted_dir"/*)
@@ -377,7 +434,7 @@ for plugin in plugins:
             "resolved_entry": source_spec if action == "installed" else None,
         })
 
-deduped = []
+ deduped = []
 seen = set()
 for entry in resolved_plugin_entries:
     if entry in seen:
@@ -398,7 +455,13 @@ if opencode_json_path.exists():
 
 if "$schema" not in data:
     data["$schema"] = "https://opencode.ai/config.json"
-data["plugin"] = deduped
+
+# Merge existing plugins with newly resolved entries (preserve existing, add new)
+existing_set = set(existing_plugins)
+new_set = set(deduped)
+# Keep existing plugins that weren't matched, add new ones
+merged = list(existing_plugins) + [e for e in deduped if e not in existing_set]
+data["plugin"] = merged
 
 with opencode_json_path.open("w", encoding="utf-8") as f:
     json.dump(data, f, indent=2)
@@ -883,7 +946,13 @@ main() {
   local dest_config_dir="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
   local dest_data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
   local dest_auth_file="$dest_data_dir/auth.json"
-  local dest_multi_auth_dir="${OPENCODE_MULTI_AUTH_STORE_DIR:-$HOME/.config/opencode-multi-auth}"
+  local dest_multi_auth_dir
+  if [[ -n "${OPENCODE_MULTI_AUTH_STORE_DIR:-}" ]]; then
+    dest_multi_auth_dir="$OPENCODE_MULTI_AUTH_STORE_DIR"
+  else
+    # Auto-discover multi-auth store path from the CLI
+    dest_multi_auth_dir="$(opencode-multi-auth path 2>/dev/null || echo "$HOME/.config/opencode-multi-auth")"
+  fi
   local dest_config_file="$dest_config_dir/opencode.json"
 
   local backup_root="$BACKUP_DIR/import-$timestamp"
@@ -903,6 +972,7 @@ main() {
   else
     backup_current_state "$manifest_path" "$backup_root" "$dest_config_dir" "$dest_auth_file" "$dest_multi_auth_dir"
     restore_source_first_state "$bundle_root" "$imported_snapshot_root" "$dest_config_dir" "$dest_auth_file" "$dest_multi_auth_dir"
+    reset_multi_auth_invalid_flags "$dest_multi_auth_dir"
     apply_plugin_sources_and_config "$bundle_root" "$dest_config_dir" "$report_root/runtime.json"
   fi
 
