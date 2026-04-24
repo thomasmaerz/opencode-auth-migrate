@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/opencode-auth-migrate/verification-report.schema.json",
+  "title": "OpenCode Auth Migrate Verification Report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "created_at",
+    "prompt",
+    "results"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "prompt": {
+      "type": "string"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "provider",
+          "status"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "skip"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "contains_expected_text": {
+            "type": "boolean"
+          },
+          "log_file": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}
