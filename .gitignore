@@ -1,0 +1,8 @@
+.work/
+dist/
+backups/
+imported-snapshots/
+reports/
+*.tar.gz
+*.tar.gz.enc
+*.sha256
