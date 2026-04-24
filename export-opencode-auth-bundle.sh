@@ -89,6 +89,11 @@ parse_args() {
         STOCK_SOURCE="$2"
         shift 2
         ;;
+      --password)
+        [[ $# -ge 2 ]] || die "--password requires a value"
+        ENCRYPT_PASSWORD="$2"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -237,6 +242,14 @@ for cfg_path in config_files:
                 continue
             plugins_seen.add(key)
             plugins.append(key)
+            
+            spec_lower = key.lower()
+            if "opencode-multi-auth" in spec_lower or "multi-auth" in spec_lower:
+                add_active_provider("openai")
+                add_active_provider("codex")
+            if "antigravity" in spec_lower:
+                add_active_provider("google")
+                add_active_provider("antigravity")
 
     provider_block = cfg.get("provider", {})
     if isinstance(provider_block, dict):
@@ -652,8 +665,13 @@ main() {
     final_bundle="$raw_bundle"
   else
     final_bundle="$DIST_DIR/$bundle_name.tar.gz.enc"
-    log "encrypting bundle with OpenSSL (you will be prompted for passphrase)"
-    openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$raw_bundle" -out "$final_bundle"
+    if [[ -n "${ENCRYPT_PASSWORD:-}" ]]; then
+      log "encrypting bundle with OpenSSL (using provided passphrase)"
+      openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$raw_bundle" -out "$final_bundle" -pass pass:"$ENCRYPT_PASSWORD"
+    else
+      log "encrypting bundle with OpenSSL (you will be prompted for passphrase)"
+      openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$raw_bundle" -out "$final_bundle"
+    fi
     rm -f "$raw_bundle"
   fi
 

@@ -73,6 +73,11 @@ parse_args() {
         SELF_CHECK=1
         shift
         ;;
+      --password)
+        [[ $# -ge 2 ]] || die "--password requires a value"
+        ENCRYPT_PASSWORD="$2"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -105,8 +110,13 @@ decrypt_if_needed() {
   local source_bundle="$1"
   local out_tar="$2"
   if [[ "$source_bundle" == *.enc ]]; then
-    log "decrypting bundle (passphrase prompt expected)"
-    openssl enc -d -aes-256-cbc -pbkdf2 -in "$source_bundle" -out "$out_tar"
+    if [[ -n "${ENCRYPT_PASSWORD:-}" ]]; then
+      log "decrypting bundle (using provided passphrase)"
+      openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "$source_bundle" -out "$out_tar" -pass pass:"$ENCRYPT_PASSWORD"
+    else
+      log "decrypting bundle (passphrase prompt expected)"
+      openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "$source_bundle" -out "$out_tar"
+    fi
   else
     cp "$source_bundle" "$out_tar"
   fi
