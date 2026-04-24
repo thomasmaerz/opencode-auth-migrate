@@ -20,6 +20,8 @@ This project provides three migration paths:
 
 Use the shell scripts directly for fully automated, reproducible migrations.
 
+Best fit: perfect for moving between the same OpenCode version when plugins are already up to date.
+
 | Feature | Value |
 |---------|-------|
 | Determinism | High |
@@ -38,6 +40,8 @@ Files: `export-opencode-auth-bundle.sh`, `import-opencode-auth-bundle.sh`
 ### Path 2: Agentic Prompt-Only Mode
 
 Give the playbook prompts to an AI agent for ecosystem-aware decisions.
+
+Best fit: recommended when migrating between different OpenCode versions.
 
 | Feature | Value |
 |---------|-------|
@@ -58,6 +62,8 @@ Files: `playbooks/auth-export-playbook.md`, `playbooks/auth-import-playbook.md`
 ### Path 3: Agentic Command Mode
 
 Use OpenCode commands that execute playbooks automatically.
+
+Best fit: recommended when migrating between different OpenCode versions.
 
 | Feature | Value |
 |---------|-------|
