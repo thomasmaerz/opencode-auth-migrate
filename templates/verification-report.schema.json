@@ -55,6 +55,15 @@
           "contains_expected_text": {
             "type": "boolean"
           },
+          "selection_strategy": {
+            "type": "string"
+          },
+          "model_candidates_considered": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "log_file": {
             "type": "string"
           }

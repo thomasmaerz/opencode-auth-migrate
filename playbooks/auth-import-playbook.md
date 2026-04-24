@@ -31,20 +31,30 @@ Perform the following steps exactly:
    - Restore config files
    - Restore plugin state directories
 
-6. **Run one-model-per-provider test**
-   - For each provider in config, run: `opencode run -m <provider>/<model> "Reply with exactly: PROVIDER_OK"`
-   - Report pass/fail for each
+6. **Run one-model-per-provider test for all present providers**
+   - Build provider set from the union of restored auth providers and restored config providers
+   - Use cheaper/free verification model selection policy:
+     - `google` (antigravity): prefer `google/antigravity-gemini-3-flash:low`, then `google/antigravity-gemini-3-flash`
+     - `openai`/codex: prefer codex-mini/mini models
+     - `openrouter`: prefer models marked free (`:free`, `/free`, `-free`)
+     - `kilo`: prefer `kilo/kilo-auto/free`, then models marked free
+     - `opencode` or `zen`: prefer models marked free
+     - Otherwise use cheap heuristics (`free`, `lite`, `mini`, `nano`, `small`, `flash`) then fallback selection
+   - Run: `opencode run -m <provider>/<selected-cheap-model> "Reply with exactly: PROVIDER_OK"`
+   - Report pass/fail/skip for each provider
+   - If any provider fails or is skipped, warn and continue; include details in post-run report
 
 7. **Output report**
    - Report plugin_actions (list with action: updated_from_ecosystem|installed_from_original|skipped_already_present|failed)
    - Report provider_results (list with status: pass|fail|skip)
+   - Include model selection strategy in provider results
    - Store report as JSON
 
 ## Requirements
 
 - Always check ecosystem first before falling back to exported sources
 - Prompt for user confirmation if fallback needed
-- Test every provider that has configuration
+- Test every provider present in restored auth/config
 - Handle the guard22/opencode-multi-auth-codex repo specially
 
 ## Key References

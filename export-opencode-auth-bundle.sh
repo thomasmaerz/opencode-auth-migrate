@@ -118,6 +118,7 @@ build_context() {
   python3 - "$config_dir" "$auth_file" "$@" >"$context_json" <<'PY'
 import json
 import os
+import re
 import sys
 from typing import Any
 
@@ -140,6 +141,40 @@ def sanitize_path(value: str) -> str:
     if expanded == home:
         return "~"
     return value
+
+def add_unique(items, seen, value):
+    value = value.strip()
+    if not value:
+        return
+    if value in seen:
+        return
+    seen.add(value)
+    items.append(value)
+
+def provider_from_model_ref(value):
+    candidate = str(value).strip()
+    if "/" not in candidate:
+        return None
+    provider = candidate.split("/", 1)[0].strip()
+    if not provider:
+        return None
+    if not re.match(r"^[A-Za-z0-9._-]+$", provider):
+        return None
+    return provider
+
+def collect_model_provider_refs(node, add_provider):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            key_l = key.lower() if isinstance(key, str) else ""
+            if isinstance(value, str):
+                if key_l in {"model", "small_model", "large_model", "default_model", "fallback_model"} or key_l.endswith("_model"):
+                    provider = provider_from_model_ref(value)
+                    if provider:
+                        add_provider(provider)
+            collect_model_provider_refs(value, add_provider)
+    elif isinstance(node, list):
+        for item in node:
+            collect_model_provider_refs(item, add_provider)
 
 def classify_plugin(entry: str, token_index: int):
     raw = str(entry)
@@ -179,7 +214,13 @@ def classify_plugin(entry: str, token_index: int):
 plugins_seen = set()
 plugins = []
 providers_from_config = []
+providers_from_config_seen = set()
 provider_models = {}
+active_providers = []
+active_provider_seen = set()
+
+def add_active_provider(provider):
+    add_unique(active_providers, active_provider_seen, provider)
 
 for cfg_path in config_files:
     cfg = load_json(cfg_path)
@@ -200,8 +241,8 @@ for cfg_path in config_files:
     provider_block = cfg.get("provider", {})
     if isinstance(provider_block, dict):
         for provider, provider_cfg in provider_block.items():
-            if provider not in providers_from_config:
-                providers_from_config.append(provider)
+            add_unique(providers_from_config, providers_from_config_seen, provider)
+            add_active_provider(provider)
             model_keys = []
             if isinstance(provider_cfg, dict):
                 models = provider_cfg.get("models", {})
@@ -209,10 +250,16 @@ for cfg_path in config_files:
                     model_keys = [m for m in models.keys() if isinstance(m, str)]
             provider_models[provider] = model_keys
 
+    collect_model_provider_refs(cfg, add_active_provider)
+
 auth_data = load_json(auth_file)
-providers_from_auth = []
+providers_from_auth_all = []
+providers_from_auth_active = []
+stale_auth_providers = []
 if isinstance(auth_data, dict):
-    providers_from_auth = [k for k in auth_data.keys() if isinstance(k, str)]
+    providers_from_auth_all = [k for k in auth_data.keys() if isinstance(k, str)]
+    providers_from_auth_active = [k for k in providers_from_auth_all if k in active_provider_seen]
+    stale_auth_providers = [k for k in providers_from_auth_all if k not in active_provider_seen]
 
 classified_plugins = []
 local_counter = 1
@@ -224,8 +271,12 @@ for item in plugins:
 
 result = {
     "plugins": classified_plugins,
-    "providers_from_auth": providers_from_auth,
+    "providers_from_auth": providers_from_auth_active,
+    "providers_from_auth_all": providers_from_auth_all,
+    "providers_from_auth_active": providers_from_auth_active,
     "providers_from_config": providers_from_config,
+    "active_providers": active_providers,
+    "stale_auth_providers": stale_auth_providers,
     "provider_models": provider_models,
     "config_files": [sanitize_path(p) for p in config_files],
     "auth_file": sanitize_path(auth_file),
@@ -246,12 +297,14 @@ write_staging_content() {
   local multi_auth_store_file="$7"
   local codex_auth_file="$8"
   local opencode_version="$9"
+  local stock_source="${10}"
 
-  python3 - "$context_json" "$staging_dir" "$config_dir" "$data_dir" "$auth_file" "$multi_auth_dir" "$multi_auth_store_file" "$codex_auth_file" "$opencode_version" "$TEST_PROMPT" <<'PY'
+  python3 - "$context_json" "$staging_dir" "$config_dir" "$data_dir" "$auth_file" "$multi_auth_dir" "$multi_auth_store_file" "$codex_auth_file" "$opencode_version" "$stock_source" "$TEST_PROMPT" <<'PY'
 import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -265,7 +318,8 @@ multi_auth_dir = Path(sys.argv[6])
 multi_auth_store_file = Path(sys.argv[7])
 codex_auth_file = Path(sys.argv[8])
 opencode_version = sys.argv[9]
-test_prompt = sys.argv[10]
+stock_source = sys.argv[10]
+test_prompt = sys.argv[11]
 
 with context_path.open("r", encoding="utf-8") as f:
     context = json.load(f)
@@ -292,12 +346,95 @@ def copy_file(src: Path, dst: Path):
     shutil.copy2(src, dst)
     return True
 
+active_provider_set = set(str(p) for p in context.get("active_providers", []) if isinstance(p, str))
+stale_provider_list = [str(p) for p in context.get("stale_auth_providers", []) if isinstance(p, str)]
+
+def provider_file_stale(name: str) -> bool:
+    lower_name = name.lower()
+    if not lower_name.endswith(".json"):
+        return False
+    for provider in stale_provider_list:
+        token = provider.strip().lower()
+        if not token:
+            continue
+        pattern = re.compile(rf"(^|[^a-z0-9]){re.escape(token)}([^a-z0-9]|$)")
+        if pattern.search(lower_name):
+            return True
+    return False
+
+def sanitize_provider_block(data: dict):
+    provider = data.get("provider")
+    if not isinstance(provider, dict):
+        return data
+    filtered = {}
+    for key, value in provider.items():
+        if not isinstance(key, str):
+            continue
+        if key in active_provider_set:
+            filtered[key] = value
+    data["provider"] = filtered
+    return data
+
+def copy_sanitized_config_dir(src: Path, dst: Path):
+    if not src.exists() or not src.is_dir():
+        return False
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+
+    for root, _, files in os.walk(src):
+        root_path = Path(root)
+        rel_dir = root_path.relative_to(src)
+        dst_dir = dst / rel_dir
+        dst_dir.mkdir(parents=True, exist_ok=True)
+
+        for file_name in files:
+            src_file = root_path / file_name
+            dst_file = dst_dir / file_name
+
+            if rel_dir == Path(".") and file_name in {"opencode.json", "config.json"}:
+                try:
+                    with src_file.open("r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        data = sanitize_provider_block(data)
+                    with dst_file.open("w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+                    continue
+                except Exception:
+                    pass
+
+            if rel_dir == Path(".") and provider_file_stale(file_name):
+                continue
+
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst_file)
+
+    return True
+
+def copy_sanitized_auth(src: Path, dst: Path):
+    if not src.exists() or not src.is_file():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with src.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            filtered = {k: v for k, v in data.items() if k in active_provider_set}
+            with dst.open("w", encoding="utf-8") as f:
+                json.dump(filtered, f, indent=2)
+            return True
+    except Exception:
+        pass
+    shutil.copy2(src, dst)
+    return True
+
 included = []
 
-if copy_dir(config_dir, snapshots_dir / "config" / "opencode"):
+if copy_sanitized_config_dir(config_dir, snapshots_dir / "config" / "opencode"):
     included.append("snapshots/config/opencode")
 
-if copy_file(auth_file, snapshots_dir / "data" / "opencode" / "auth.json"):
+if copy_sanitized_auth(auth_file, snapshots_dir / "data" / "opencode" / "auth.json"):
     included.append("snapshots/data/opencode/auth.json")
 
 if copy_dir(multi_auth_dir, snapshots_dir / "plugin-state" / "opencode-multi-auth"):
@@ -313,6 +450,7 @@ for plugin in context.get("plugins", []):
     plugin_out = {
         "kind": plugin.get("kind"),
         "source_spec": plugin.get("source_spec"),
+        "is_stock": bool(plugin.get("is_stock", False)),
     }
     if plugin.get("kind") == "local":
         token = plugin.get("token")
@@ -347,10 +485,12 @@ manifest = {
     },
     "plugins": exported_plugins,
     "non_stock_auth_plugins": [p.get("source_spec") for p in exported_plugins if not p.get("is_stock", False)],
-    "stock_source_used": STOCK_SOURCE,
+    "stock_source_used": stock_source,
     "providers": {
-        "from_auth": context.get("providers_from_auth", []),
+        "from_auth": context.get("providers_from_auth_active", context.get("providers_from_auth", [])),
         "from_config": context.get("providers_from_config", []),
+        "active": context.get("active_providers", []),
+        "excluded_stale": context.get("stale_auth_providers", []),
         "provider_models": context.get("provider_models", {}),
     },
     "included_paths": sorted(set(included)),
@@ -408,6 +548,9 @@ with context_path.open("r", encoding="utf-8") as f:
 plugins = ctx.get("plugins", [])
 local_count = len([p for p in plugins if p.get("kind") == "local"])
 non_stock = [p.get("source_spec") for p in plugins if not p.get("is_stock", False)]
+active = ctx.get("active_providers", [])
+providers_from_auth_active = ctx.get("providers_from_auth_active", ctx.get("providers_from_auth", []))
+stale_auth = ctx.get("stale_auth_providers", [])
 
 print("[export] dry run summary")
 print(f"[export] config dir: {config_dir}")
@@ -415,8 +558,15 @@ print(f"[export] data dir: {data_dir}")
 print(f"[export] auth file: {auth_file} (exists={auth_file.exists()})")
 print(f"[export] multi-auth dir: {multi_auth_dir} (exists={multi_auth_dir.exists()})")
 print(f"[export] plugins detected: {len(plugins)} (local={local_count}, package={len(plugins)-local_count})")
-print(f"[export] providers from auth: {len(ctx.get('providers_from_auth', []))}")
+print(f"[export] providers active from config: {len(active)}")
+print(f"[export] providers from auth (active only): {len(providers_from_auth_active)}")
 print(f"[export] providers from config: {len(ctx.get('providers_from_config', []))}")
+if stale_auth:
+    print("[export] stale auth providers excluded from export:")
+    for i, provider in enumerate(stale_auth, 1):
+        print(f"[export] {i}) {provider}")
+else:
+    print("[export] stale auth providers excluded from export: none")
 if non_stock:
     print("[export] non-stock auth plugins detected:")
     for i, p in enumerate(non_stock, 1):
@@ -490,7 +640,8 @@ main() {
     "$multi_auth_dir" \
     "$multi_auth_store_file" \
     "$codex_auth_file" \
-    "$opencode_version"
+    "$opencode_version" \
+    "$STOCK_SOURCE"
 
   local raw_bundle
   raw_bundle="$DIST_DIR/$bundle_name.tar.gz"

@@ -513,12 +513,43 @@ cfg = load_json(config_file)
 provider_cfg = cfg.get("provider", {}) if isinstance(cfg.get("provider", {}), dict) else {}
 
 providers = []
+
+def add_provider(provider: str):
+    provider = provider.strip()
+    if not provider:
+        return
+    if not re.match(r"^[A-Za-z0-9._-]+$", provider):
+        return
+    if provider not in providers:
+        providers.append(provider)
+
+def provider_from_model_ref(value: str):
+    candidate = value.strip()
+    if "/" not in candidate:
+        return None
+    return candidate.split("/", 1)[0].strip()
+
+def collect_model_provider_refs(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            key_l = key.lower() if isinstance(key, str) else ""
+            if isinstance(value, str):
+                if key_l in {"model", "small_model", "large_model", "default_model", "fallback_model"} or key_l.endswith("_model"):
+                    provider = provider_from_model_ref(value)
+                    if provider:
+                        add_provider(provider)
+            collect_model_provider_refs(value)
+    elif isinstance(node, list):
+        for item in node:
+            collect_model_provider_refs(item)
+
 for p in provider_cfg.keys():
-    if isinstance(p, str) and p not in providers:
-        providers.append(p)
+    if isinstance(p, str):
+        add_provider(p)
 for p in auth.keys():
-    if isinstance(p, str) and p not in providers:
-        providers.append(p)
+    if isinstance(p, str):
+        add_provider(p)
+collect_model_provider_refs(cfg)
 
 def first_config_model(provider: str):
     item = provider_cfg.get(provider, {})
@@ -531,35 +562,166 @@ def first_config_model(provider: str):
                 return key
     return None
 
-def first_cli_model(provider: str):
+def parse_provider_models(text: str, provider: str):
+    models = []
+    seen = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if not line.startswith(provider + "/"):
+            continue
+        if line in seen:
+            continue
+        seen.add(line)
+        models.append(line)
+    return models
+
+def build_models_index():
+    index = {}
     try:
-        proc = subprocess.run(["opencode", "models", provider], capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(["opencode", "models"], capture_output=True, text=True, timeout=45)
     except Exception:
-        return None
+        return index
+
     text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    pattern = re.compile(rf"{re.escape(provider)}/[A-Za-z0-9._:/-]+")
-    match = pattern.search(text)
-    if match:
-        return match.group(0)
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "/" not in line:
+            continue
+        provider = line.split("/", 1)[0].strip()
+        if not re.match(r"^[A-Za-z0-9._-]+$", provider):
+            continue
+        bucket = index.setdefault(provider, [])
+        if line not in bucket:
+            bucket.append(line)
+    return index
+
+models_index = build_models_index()
+
+def list_cli_models(provider: str):
+    return list(models_index.get(provider, []))
+
+def first_cli_model(provider: str):
+    models = list_cli_models(provider)
+    if models:
+        return models[0]
     return None
+
+def model_is_free(model_ref: str):
+    token = model_ref.lower()
+    return ":free" in token or token.endswith("/free") or "-free" in token
+
+def model_is_cheap(model_ref: str):
+    token = model_ref.lower()
+    cheap_tokens = ["mini", "nano", "lite", "small", "flash"]
+    return any(t in token for t in cheap_tokens)
+
+def mapped_candidates(provider: str):
+    lower = provider.lower()
+    if lower in {"google", "antigravity"}:
+        return [
+            f"{provider}/antigravity-gemini-3-flash:low",
+            f"{provider}/antigravity-gemini-3-flash",
+        ]
+    if lower in {"openai", "codex"}:
+        return [
+            f"{provider}/gpt-5.1-codex-mini",
+            f"{provider}/gpt-5-codex-mini",
+            f"{provider}/gpt-5-mini",
+        ]
+    if lower == "openrouter":
+        return [f"{provider}/openrouter/free"]
+    if lower == "kilo":
+        return [f"{provider}/kilo-auto/free"]
+    if lower in {"opencode", "zen"}:
+        return [
+            f"{provider}/nemotron-3-super-free",
+            f"{provider}/kilo-auto/free",
+        ]
+    return []
+
+def model_available_or_variant(candidate: str, available_models):
+    if not available_models:
+        return True
+    if candidate in available_models:
+        return True
+    if ":" in candidate:
+        base = candidate.split(":", 1)[0]
+        if base in available_models:
+            return True
+    return False
+
+def resolve_verification_model(provider: str):
+    available_models = list_cli_models(provider)
+    candidates = []
+    seen = set()
+
+    def add_candidate(model_ref, strategy):
+        if not isinstance(model_ref, str) or not model_ref.strip():
+            return
+        model_ref = model_ref.strip()
+        if not model_ref.startswith(provider + "/"):
+            model_ref = f"{provider}/{model_ref}"
+        if model_ref in seen:
+            return
+        seen.add(model_ref)
+        candidates.append((model_ref, strategy))
+
+    for model_ref in mapped_candidates(provider):
+        if model_available_or_variant(model_ref, available_models):
+            add_candidate(model_ref, "mapped-default")
+
+    lower = provider.lower()
+    prefers_free = lower in {"openrouter", "kilo", "opencode", "zen"}
+
+    free_models = [m for m in available_models if model_is_free(m)]
+    cheap_models = [m for m in available_models if model_is_cheap(m)]
+
+    if prefers_free:
+        for model_ref in free_models:
+            add_candidate(model_ref, "free-preferred")
+
+    for model_ref in free_models:
+        add_candidate(model_ref, "free")
+
+    for model_ref in cheap_models:
+        add_candidate(model_ref, "cheap")
+
+    config_model = first_config_model(provider)
+    if config_model:
+        add_candidate(config_model, "config-first")
+
+    cli_model = first_cli_model(provider)
+    if cli_model:
+        add_candidate(cli_model, "cli-first")
+
+    if available_models:
+        add_candidate(available_models[0], "available-first")
+
+    if not candidates:
+        return None, "no-model-found", []
+
+    selected_model, strategy = candidates[0]
+    considered = [item[0] for item in candidates]
+    return selected_model, strategy, considered
 
 results = []
 
 for provider in providers:
-    model = first_config_model(provider)
-    if model is None:
-        model = first_cli_model(provider)
+    model_ref, selection_strategy, considered_models = resolve_verification_model(provider)
 
-    if model is None:
+    if model_ref is None:
         results.append({
             "provider": provider,
             "model": None,
             "status": "skip",
             "reason": "no-model-found",
+            "selection_strategy": selection_strategy,
+            "model_candidates_considered": considered_models,
         })
         continue
 
-    model_ref = model if model.startswith(provider + "/") else f"{provider}/{model}"
     safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", provider)
     log_file = report_dir / f"provider-{safe_name}.log"
 
@@ -569,6 +731,8 @@ for provider in providers:
             "model": model_ref,
             "status": "skip",
             "reason": "dry-run",
+            "selection_strategy": selection_strategy,
+            "model_candidates_considered": considered_models,
             "log_file": str(log_file),
         })
         continue
@@ -590,6 +754,8 @@ for provider in providers:
             "status": "pass" if ok else "fail",
             "exit_code": proc.returncode,
             "contains_expected_text": "PROVIDER_OK" in output,
+            "selection_strategy": selection_strategy,
+            "model_candidates_considered": considered_models,
             "log_file": str(log_file),
         })
     except subprocess.TimeoutExpired:
@@ -600,6 +766,8 @@ for provider in providers:
             "model": model_ref,
             "status": "fail",
             "reason": "timeout",
+            "selection_strategy": selection_strategy,
+            "model_candidates_considered": considered_models,
             "log_file": str(log_file),
         })
 
@@ -750,6 +918,22 @@ PY
   local report_json="$report_root/verification-report.json"
   run_provider_verification "$dest_auth_file" "$dest_config_file" "$report_json" "$report_root" "$DRY_RUN"
   print_report_summary "$report_json"
+  python3 - "$report_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+with path.open("r", encoding="utf-8") as f:
+    report = json.load(f)
+
+results = report.get("results", [])
+fail_count = len([r for r in results if r.get("status") == "fail"])
+skip_count = len([r for r in results if r.get("status") == "skip"])
+
+if fail_count or skip_count:
+    print(f"[import][warn] provider verification contains fail/skip results (fail={fail_count}, skip={skip_count}); review verification-report.json and provider logs")
+PY
 
   log "verification report: $report_json"
   log "backup created at: $backup_root"

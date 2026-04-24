@@ -5,11 +5,12 @@ Export and import OpenCode auth/provider/plugin state between machines with encr
 ## What It Does
 
 - Exports OpenCode config/auth/plugin-state data into a bundle.
+- Filters out stale provider auth/config payloads during export (config-driven active provider detection).
 - Captures plugin sources from their original references (npm/git specs and local plugin source snapshots).
 - Encrypts the bundle with OpenSSL passphrase protection.
 - Imports into another machine with source-first plugin restore.
 - Offers fallback to full snapshot restore if source-first bootstrap fails.
-- Runs one provider smoke test per provider using:
+- Runs one provider smoke test per detected provider using cheapest/free model selection policy when possible:
   - `Reply with exactly: PROVIDER_OK`
 
 ## Choose Your Workflow
@@ -140,8 +141,11 @@ cd ~/opencode-auth-migrate
 ## Important Behavior
 
 - No OpenCode version gate is enforced.
+- Export sanitizes bundled auth/config snapshots to exclude stale providers not currently active in config.
 - Source-first plugin reinstall is attempted by rebuilding plugin entries from the exported manifest.
 - If source-first bootstrap fails, the importer can apply fallback full snapshot restore.
+- Import verification checks all providers present in restored auth/config and prefers free/cheap models (antigravity flash low, codex mini, free-tagged models for openrouter/kilo/opencode-zen when available).
+- Provider verification failures/skips are reported as warnings and included in the JSON report; import continues.
 - Full bundle snapshots are copied to `./imported-snapshots/` for troubleshooting.
 
 ## Non-Stock Auth Plugins
@@ -182,6 +186,7 @@ The export script detects and reports non-stock auth plugins by comparing agains
 - Provider logs: `./reports/import-<timestamp>/provider-*.log`
 - Bootstrap log: `./reports/import-<timestamp>/bootstrap.log`
 - Automatic backups before import: `./backups/import-<timestamp>/`
+- Verification report includes model selection strategy and considered candidates per provider.
 
 ## Security Notes
 
