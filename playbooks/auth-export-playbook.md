@@ -1,49 +1,79 @@
 # Auth Export Playbook
 
-You are executing an agentic export of OpenCode auth and plugin migration bundle.
+You are executing an export of OpenCode auth and plugin migration bundle with ecosystem-first plugin discovery.
 
 ## Your Task
 
 Perform the following steps exactly:
 
-1. **Derive active providers from config and collect plugin metadata**
-   - Read OpenCode config files (`~/.config/opencode/opencode.json`, `~/.config/opencode/config.json`)
-   - Build active-provider set from configured provider blocks and model refs (`*model` fields)
-   - Extract all plugin entries from the `plugin` array
-   - Identify whether each plugin is local (path) or package (npm-style)
+1. **Detect active providers correctly**
+   - Collect providers from `auth.json` (all providers with stored tokens/keys)
+   - Collect providers from `opencode.json` `provider` config blocks
+   - **CRITICAL for multi-auth plugins**: Detect providers managed dynamically by plugins:
+     - Check if `opencode-multi-auth` or `@guard22/opencode-multi-auth-codex` is in plugins
+     - If yes, ADD `openai` to active providers (plugin manages this dynamically)
+     - Check if `opencode-antigravity-auth` is in plugins
+     - If yes, ADD `google` to active providers (plugin manages this dynamically)
+   - **Reason**: These plugins create provider blocks at runtime and won't appear in config
 
-2. **Compute and print non-stock auth plugins**
-   - Compare detected plugins against the stock catalog at `catalog/stock-auth-plugins.json`
-   - Print the list of non-stock plugins to the terminal
-   - Reference: https://opencode.ai/docs/ecosystem/
+2. **Filter stale providers**
+   - Only export auth entries for active providers
+   - Stale providers are those in auth.json but NOT in active providers
+   - This prevents exporting auth for providers that aren't configured
 
-3. **Exclude stale provider auth/config payloads from export snapshots**
-   - Treat providers not in the active-provider set as stale
-   - Do not export API keys/tokens/metadata for stale providers
-   - Sanitize bundled `auth.json` and config provider blocks before writing bundle snapshots
-   - Example: if `qwen`, `qwen-code`, `qwen-code-oauth` are not active in config, they must be excluded
+3. **Export tokens/keys/config**
+   - Export auth.json tokens for active providers
+   - Export config files (opencode.json, config.json)
+   - Export plugin state directories (e.g., `opencode-multi-auth/` from store path)
 
-4. **Produce encrypted bundle and manifest**
-   - Run: `./export-opencode-auth-bundle.sh --output ./dist/agentic-export-$(date -u +"%Y%m%dT%H%M%SZ").tar.gz.enc`
-   - This creates an encrypted tar.gz bundle with manifest.json
+4. **Discover plugin sources**
+   - Read `https://opencode.ai/docs/ecosystem/` for available plugins
+   - For each plugin in opencode.json:
+     - Check ecosystem first
+     - Fall back to guard22 GitHub for multi-auth: `https://github.com/guard22/opencode-multi-auth-codex`
+     - Use `npm show <package>@latest` to get version info
 
-5. **Include troubleshooting snapshots**
-   - Capture sanitized config directory snapshot
-   - Capture sanitized auth.json snapshot (DO NOT include actual tokens/keys in logs)
-   - Capture plugin-state directories if present
+5. **Bundle and encrypt**
+   - Create bundle with snapshots, manifest, checksums
+   - Encrypt with AES-256-CBC
+   - Use `-pbkdf2 -iter 200000` for key derivation
+   - Support `--password` flag for non-interactive use
+
+6. **Verify exported accounts**
+   - Run `opencode-multi-auth status` to check accounts are exported
+   - Verify bundle integrity with checksums
 
 ## Requirements
 
-- Use the test prompt: `Reply with exactly: PROVIDER_OK`
-- Include all detected plugins in the manifest
-- Print non-stock plugin detection results before creating bundle
-- Print stale providers excluded from export (or `none`)
-- Output final bundle path
+- Always detect multi-auth/antigravity plugins and add their dynamic providers
+- Filter stale providers from export (don't export auth for unused providers)
+- Use correct encryption parameters (`-iter 200000`)
+- Support `--password` flag for automation
+
+## Key References
+
+- Ecosystem: https://opencode.ai/docs/ecosystem/
+- Multi-auth: https://github.com/guard22/opencode-multi-auth-codex
+- Multi-auth store path: `opencode-multi-auth path` (default: ~/.config/opencode-multi-auth/)
 
 ## Output
 
 When complete, report:
-- Non-stock plugins detected (list)
-- Stale providers excluded from export (list)
-- Bundle path created
-- Manifest summary (plugin count, provider count)
+- Exported providers and account counts
+- Plugin sources discovered
+- Bundle path and checksums
+- Verification results (accounts present, models check)
+
+## Troubleshooting
+
+### "openai" provider filtered as stale
+- Check if multi-auth plugin is detected
+- Verify `openai` is added to active providers when multi-auth is present
+
+### Bundle decryption fails
+- Ensure encryption and decryption use same parameters (`-pbkdf2 -iter 200000`)
+- Check password is correct
+
+### Multi-auth accounts missing from export
+- Check `opencode-multi-auth path` for correct store directory
+- Verify `accounts.json` exists and has accounts
