@@ -179,6 +179,45 @@ except Exception as e:
 PY
 }
 
+reset_antigravity_rate_limits() {
+  local config_dir="$1"
+  local accounts_file="$config_dir/antigravity-accounts.json"
+  if [[ ! -f "$accounts_file" ]]; then
+    return 0
+  fi
+  python3 - "$accounts_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    changed = False
+    accounts = data.get("accounts", [])
+    if isinstance(accounts, list):
+        for acc in accounts:
+            # Reset rate limits that were specific to the source machine
+            for key in ("rateLimitResetTimes", "cachedQuota", "cachedQuotaUpdatedAt"):
+                if key in acc:
+                    print(f"[import] clearing {key} for antigravity account")
+                    if key == "rateLimitResetTimes":
+                        acc[key] = {}
+                    else:
+                        del acc[key]
+                    changed = True
+    if changed:
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        print("[import] reset rate limits on imported antigravity accounts")
+    else:
+        print("[import] no antigravity rate limits to reset")
+except Exception as e:
+    print(f"[import][warn] failed to reset antigravity rate limits: {e}")
+PY
+}
+
 locate_bundle_root() {
   local extracted_dir="$1"
   local entries=("$extracted_dir"/*)
@@ -289,6 +328,7 @@ restore_source_first_state() {
   python3 - "$bundle_root" "$imported_snapshot_root" "$dest_config_dir" "$dest_auth_file" "$dest_multi_auth_dir" <<'PY'
 import shutil
 import sys
+import json
 from pathlib import Path
 
 bundle_root = Path(sys.argv[1])
@@ -314,11 +354,75 @@ def copy_file(src: Path, dst: Path):
     shutil.copy2(src, dst)
     return True
 
+def merge_accounts(src: Path, dst: Path):
+    if not src.exists():
+        return False
+    if not dst.exists():
+        return copy_file(src, dst)
+    
+    try:
+        with src.open("r") as f:
+            src_data = json.load(f)
+        with dst.open("r") as f:
+            dst_data = json.load(f)
+            
+        changed = False
+        # Dict-style (multi-auth)
+        if isinstance(src_data.get("accounts"), dict) and isinstance(dst_data.get("accounts"), dict):
+            for alias, acc in src_data["accounts"].items():
+                if alias not in dst_data["accounts"] or dst_data["accounts"][alias] != acc:
+                    dst_data["accounts"][alias] = acc
+                    changed = True
+        # List-style (antigravity/puter)
+        elif isinstance(src_data.get("accounts"), list) and isinstance(dst_data.get("accounts"), list):
+            dst_accounts = dst_data["accounts"]
+            # Map by refreshToken or fingerprint
+            def get_key(acc):
+                return acc.get("refreshToken") or acc.get("fingerprint") or acc.get("email")
+            
+            dst_map = {get_key(a): i for i, a in enumerate(dst_accounts) if get_key(a)}
+            for src_acc in src_data["accounts"]:
+                key = get_key(src_acc)
+                if not key:
+                    dst_accounts.append(src_acc)
+                    changed = True
+                elif key in dst_map:
+                    idx = dst_map[key]
+                    if dst_accounts[idx] != src_acc:
+                        dst_accounts[idx] = src_acc
+                        changed = True
+                else:
+                    dst_accounts.append(src_acc)
+                    changed = True
+        else:
+            # Fallback to copy if structure mismatch
+            return copy_file(src, dst)
+
+        if changed:
+            with dst.open("w") as f:
+                json.dump(dst_data, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"[import][warn] failed to merge {src.name}: {e}")
+        return copy_file(src, dst)
+
 imported_snapshot_root.mkdir(parents=True, exist_ok=True)
 copy_dir(snapshots, imported_snapshot_root / "snapshots")
 
 copy_file(snapshots / "data" / "opencode" / "auth.json", dest_auth_file)
-copy_dir(snapshots / "plugin-state" / "opencode-multi-auth", dest_multi_auth_dir)
+
+# Merge multi-auth accounts if present
+merge_accounts(snapshots / "plugin-state" / "opencode-multi-auth" / "accounts.json", dest_multi_auth_dir / "accounts.json")
+# Copy other plugin state files
+src_plugin_state = snapshots / "plugin-state" / "opencode-multi-auth"
+if src_plugin_state.exists():
+    dest_multi_auth_dir.mkdir(parents=True, exist_ok=True)
+    for f in src_plugin_state.iterdir():
+        if f.name == "accounts.json": continue
+        if f.is_file():
+            shutil.copy2(f, dest_multi_auth_dir / f.name)
+        elif f.is_dir():
+            copy_dir(f, dest_multi_auth_dir / f.name)
 
 source_config_dir = snapshots / "config" / "opencode"
 if source_config_dir.exists() and source_config_dir.is_dir():
@@ -330,6 +434,8 @@ if source_config_dir.exists() and source_config_dir.is_dir():
         if name in {"opencode.json", "config.json"}:
             continue
         if name.endswith("-accounts.json") or name in {"antigravity.json", "puter.json"}:
+            merge_accounts(file_path, dest_config_dir / name)
+        else:
             shutil.copy2(file_path, dest_config_dir / name)
 PY
 }
@@ -509,9 +615,59 @@ def replace_file(src: Path, dst: Path):
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
 
-replace_dir(snapshots / "config" / "opencode", dest_config_dir)
+def merge_accounts(src: Path, dst: Path):
+    if not src.exists(): return
+    if not dst.exists(): return replace_file(src, dst)
+    try:
+        with src.open("r") as f: src_data = json.load(f)
+        with dst.open("r") as f: dst_data = json.load(f)
+        changed = False
+        if isinstance(src_data.get("accounts"), dict) and isinstance(dst_data.get("accounts"), dict):
+            for alias, acc in src_data["accounts"].items():
+                if alias not in dst_data["accounts"] or dst_data["accounts"][alias] != acc:
+                    dst_data["accounts"][alias] = acc
+                    changed = True
+        elif isinstance(src_data.get("accounts"), list) and isinstance(dst_data.get("accounts"), list):
+            dst_accounts = dst_data["accounts"]
+            def get_key(acc): return acc.get("refreshToken") or acc.get("fingerprint") or acc.get("email")
+            dst_map = {get_key(a): i for i, a in enumerate(dst_accounts) if get_key(a)}
+            for src_acc in src_data["accounts"]:
+                key = get_key(src_acc)
+                if not key: dst_accounts.append(src_acc); changed = True
+                elif key in dst_map:
+                    idx = dst_map[key]
+                    if dst_accounts[idx] != src_acc: dst_accounts[idx] = src_acc; changed = True
+                else: dst_accounts.append(src_acc); changed = True
+        if changed:
+            with dst.open("w") as f: json.dump(dst_data, f, indent=2)
+    except Exception: replace_file(src, dst)
+
+# Non-destructive config restore
+src_config = snapshots / "config" / "opencode"
+if src_config.exists():
+    dest_config_dir.mkdir(parents=True, exist_ok=True)
+    for f in src_config.iterdir():
+        if f.name == "opencode.json": continue
+        if f.name.endswith("-accounts.json") or f.name in {"antigravity.json", "puter.json"}:
+            merge_accounts(f, dest_config_dir / f.name)
+        elif f.is_file():
+            shutil.copy2(f, dest_config_dir / f.name)
+        elif f.is_dir():
+            replace_dir(f, dest_config_dir / f.name)
+
 replace_file(snapshots / "data" / "opencode" / "auth.json", dest_auth_file)
-replace_dir(snapshots / "plugin-state" / "opencode-multi-auth", dest_multi_auth_dir)
+
+# Non-destructive multi-auth restore
+src_ma = snapshots / "plugin-state" / "opencode-multi-auth"
+if src_ma.exists():
+    dest_multi_auth_dir.mkdir(parents=True, exist_ok=True)
+    for f in src_ma.iterdir():
+        if f.name == "accounts.json":
+            merge_accounts(f, dest_multi_auth_dir / f.name)
+        elif f.is_file():
+            shutil.copy2(f, dest_multi_auth_dir / f.name)
+        elif f.is_dir():
+            replace_dir(f, dest_multi_auth_dir / f.name)
 
 # Warn about invalid accounts in multi-auth
 accounts_file = dest_multi_auth_dir / "accounts.json"
@@ -973,6 +1129,7 @@ main() {
     backup_current_state "$manifest_path" "$backup_root" "$dest_config_dir" "$dest_auth_file" "$dest_multi_auth_dir"
     restore_source_first_state "$bundle_root" "$imported_snapshot_root" "$dest_config_dir" "$dest_auth_file" "$dest_multi_auth_dir"
     reset_multi_auth_invalid_flags "$dest_multi_auth_dir"
+    reset_antigravity_rate_limits "$dest_config_dir"
     apply_plugin_sources_and_config "$bundle_root" "$dest_config_dir" "$report_root/runtime.json"
   fi
 

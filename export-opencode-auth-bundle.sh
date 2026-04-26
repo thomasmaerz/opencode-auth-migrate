@@ -366,6 +366,9 @@ def provider_file_stale(name: str) -> bool:
     lower_name = name.lower()
     if not lower_name.endswith(".json"):
         return False
+    # Account files should never be considered stale
+    if lower_name.endswith("-accounts.json") or lower_name in {"antigravity.json", "puter.json"}:
+        return False
     for provider in stale_provider_list:
         token = provider.strip().lower()
         if not token:
